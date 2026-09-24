@@ -13,13 +13,13 @@ router = APIRouter(prefix="/api/setting", tags=["系统设置"])
 service = SettingService()
 
 LIST_FIELDS = ["参数编码", "参数名称", "参数值", "参数类型", "生效范围", "修改人"]
-STATUSES = ["已生效", "待生效", "已回滚"]
+STATUSES = ["已生效", "待生效", "已回滚", "已失效"]
 
 
 @router.get("", response_model=PageResult[dict])
 def list_entries(
     keyword: str | None = Query(default=None, description="按参数编码检索"),
-    status: str | None = Query(default=None, description="已生效、待生效、已回滚"),
+    status: str | None = Query(default=None, description="已生效、待生效、已回滚、已失效"),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
@@ -28,6 +28,16 @@ def list_entries(
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
     items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出系统设置清单：返回当前过滤条件下的全量数据。
+
+    注意：该静态路径必须声明在 /{entry_id} 之前，否则会被路径参数先匹配到。
+    """
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "setting", "total": total, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -41,8 +51,10 @@ def get_entry(entry_id: int) -> dict:
 
 @router.post("", response_model=ActionResult)
 def create_entry(payload: EntryPayload) -> ActionResult:
-    """登记一条系统参数，缺字段时说明原因而不是静默丢弃。"""
-    entry, missing = service.create_entry(payload.values)
+    """登记一条系统参数，缺字段或编码重复时说明原因而不是静默丢弃。"""
+    entry, missing, error = service.create_entry(payload.values)
+    if error:
+        return ActionResult(ok=False, message=error)
     if missing:
         return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
     return ActionResult(ok=True, message="系统参数已登记", entry=entry)
@@ -50,16 +62,13 @@ def create_entry(payload: EntryPayload) -> ActionResult:
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
-    """对单条系统参数执行修改参数、回滚参数、生效参数；不允许的动作会被拦下并说明原因。"""
+    """对单条系统参数执行修改参数、回滚参数、生效参数；不允许的动作会被拦下并说明原因。
+
+    修改参数时需在 values 里带上新的参数值（及其余可改字段），后端以新版本落库，
+    不会原地覆盖任何一条历史记录。
+    """
     action = str(payload.values.get("action") or "").strip()
-    entry, message = service.run_action(entry_id, action)
+    entry, message = service.run_action(entry_id, action, payload.values)
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出系统设置清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "setting", "total": total, "items": items}
